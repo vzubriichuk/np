@@ -1,23 +1,11 @@
 from datetime import datetime, timedelta
 import sqlite3
-import urllib.request
-import csv
-import os
+import pandas as pd
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 
 SQLITE_DB_PATH = '/opt/airflow/sqlite/titanic.db'
 CSV_URL = 'https://web.stanford.edu/class/archive/cs/cs109/cs109.1166/stuff/titanic.csv'
-
-
-def download_csv(**context):
-    ti = context['ti']
-    csv_path = '/opt/airflow/titanic.csv'
-
-    urllib.request.urlretrieve(CSV_URL, csv_path)
-    ti.xcom_push(key='csv_path', value=csv_path)
-
-    return csv_path
 
 
 def create_table():
@@ -44,47 +32,18 @@ def create_table():
     conn.close()
 
 
-def load_csv_to_sqlite(**context):
-    ti = context['ti']
-    csv_path = ti.xcom_pull(key='csv_path', task_ids='download_csv')
+def load_csv_to_sqlite():
+    df = pd.read_csv(CSV_URL)
+    df.columns = [
+        'Survived', 'Pclass', 'Name', 'Sex', 'Age',
+        'Siblings_Spouses_Aboard', 'Parents_Children_Aboard', 'Fare'
+    ]
 
     conn = sqlite3.connect(SQLITE_DB_PATH)
-    cursor = conn.cursor()
-
-    with open(csv_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-
-        rows = []
-        for row in reader:
-            rows.append((
-                int(row['Survived']),
-                int(row['Pclass']),
-                row['Name'],
-                row['Sex'],
-                float(row['Age']) if row['Age'] else None,
-                int(row['Siblings/Spouses Aboard']),
-                int(row['Parents/Children Aboard']),
-                float(row['Fare']) if row['Fare'] else None,
-            ))
-
-        cursor.executemany('''
-            INSERT INTO titanic (
-                Survived, Pclass, Name, Sex, Age,
-                Siblings_Spouses_Aboard, Parents_Children_Aboard, Fare
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', rows)
-
-    conn.commit()
-
-    cursor.execute('SELECT COUNT(*) FROM titanic')
-    count = cursor.fetchone()[0]
-
+    df.to_sql('titanic', conn, if_exists='append', index=False)
     conn.close()
 
-    if os.path.exists(csv_path):
-        os.remove(csv_path)
-
-    return count
+    return len(df)
 
 
 def verify_data():
@@ -117,12 +76,6 @@ with DAG(
     catchup=False,
 ) as dag:
 
-    download_task = PythonOperator(
-        task_id='download_csv',
-        python_callable=download_csv,
-        provide_context=True,
-    )
-
     create_table_task = PythonOperator(
         task_id='create_table',
         python_callable=create_table,
@@ -131,7 +84,6 @@ with DAG(
     load_data_task = PythonOperator(
         task_id='load_csv_to_sqlite',
         python_callable=load_csv_to_sqlite,
-        provide_context=True,
     )
 
     verify_task = PythonOperator(
@@ -139,4 +91,4 @@ with DAG(
         python_callable=verify_data,
     )
 
-    download_task >> create_table_task >> load_data_task >> verify_task
+    create_table_task >> load_data_task >> verify_task
